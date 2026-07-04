@@ -1,0 +1,4 @@
+requests==2.34.2
+playwright==1.61.0
+web3==7.16.0
+eth-account==0.13.7
