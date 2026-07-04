@@ -19,7 +19,7 @@ def start_browser(profile_number):
 
     try:
         response = requests.get(f'{API_URL}/api/v1/browser/start', params=params)
-        print(f"Raw response: {response.text}")
+        # print(f"Raw response: {response.text}")
         response.raise_for_status()
         data = response.json()
 
@@ -48,7 +48,7 @@ def check_browser_status(profile_number):
         data = response.json()
 
         if data.get("code") == 0 and data["data"]["status"] == "Active":
-            print(f"Browser is active for profile {profile_number}.")
+            # print(f"Browser is active for profile {profile_number}.")
             return True
 
         else:
@@ -80,7 +80,7 @@ def close_browser(profile_number):
             return False
 
     except requests.exceptions.RequestException as e:
-        print(f"Request error while closing browser: {e}")
+        # print(f"Request error while closing browser: {e}")
         return False
 
 

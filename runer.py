@@ -1,7 +1,9 @@
 import asyncio
 import random
 
-from browser.playwright_client import activity, close_browser_connection
+from browser.management import ManagerBrowserContext
+from config import WALLET_PASSWORD
+from network.network import Network
 
 
 class Runner:
@@ -10,6 +12,7 @@ class Runner:
         self.load_accounts(filename)
         random.shuffle(self.accounts)
         print("Аккаунты загружены и перемешаны:", self.accounts)
+        self.network = Network()
 
     def load_accounts(self, filename):
         try:
@@ -21,26 +24,29 @@ class Runner:
 
     async def main(self):
         for idx, profile in enumerate(self.accounts, 1):
-            print(f"[{idx}/{len(self.accounts)}] Запуск профиля {profile}...")
-            page, playwright, browser, context = await activity(profile)
+            # self.network.get_fresh_ip()
 
-            page = await context.new_page()
-            await page.goto(
-                "https://bot.sannysoft.com",
-                wait_until="domcontentloaded",
-                timeout=15000,
-            )
+            print(f"[{idx}/{len(self.accounts)}] Запуск профиля {profile}...")
+
+            manager = ManagerBrowserContext()
+            started = await manager.start(profile)
+
+            if not started:
+                print(f"Профиль {profile} пропущен: не удалось подключиться к браузеру.")
+                continue
+
+            await manager.unlock_wallet(WALLET_PASSWORD)
+            await asyncio.sleep(1)
+
+            await manager.goto("https://rewards.testnet.app.canopynetwork.org/")
 
             """ НАЧАЛО РАБОТЫ ПРОЕКТА В БРАУЗЕРЕ"""
 
 
 
 
-
-
-
             await asyncio.sleep(35)
-            await close_browser_connection(page, playwright, browser, context, profile)
+            await manager.close()
             print(f"Профиль {profile} отработал")
 
 
