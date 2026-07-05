@@ -1,9 +1,8 @@
 import asyncio
 import random
 import math
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 from playwright.async_api import Page
-import time
 
 
 class HumanMouse:
@@ -238,7 +237,10 @@ class HumanMouse:
         """Навести курсор на елемент."""
         try:
             element = page.locator(selector).first
-            if not await element.is_visible(timeout=2000):
+            try:
+                await element.wait_for(state="visible", timeout=5000)
+            except Exception:
+                print(f"[HumanMouse] '{selector}' не появился за 5с")
                 return
             box = await element.bounding_box()
             if not box:
@@ -268,7 +270,10 @@ class HumanMouse:
         """
         try:
             element = page.locator(selector).first
-            if not await element.is_visible(timeout=2000):
+            try:
+                await element.wait_for(state="visible", timeout=5000)
+            except Exception:
+                print(f"[HumanMouse] '{selector}' не появился за 5с")
                 return
             box = await element.bounding_box()
             if not box:

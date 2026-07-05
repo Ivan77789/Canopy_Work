@@ -4,6 +4,7 @@ import random
 from browser.management import ManagerBrowserContext
 from config import WALLET_PASSWORD
 from network.network import Network
+from browser.human_emulation_brawser import HumanMouse
 
 
 class Runner:
@@ -13,6 +14,7 @@ class Runner:
         random.shuffle(self.accounts)
         print("Аккаунты загружены и перемешаны:", self.accounts)
         self.network = Network()
+        self.human = HumanMouse()
 
     def load_accounts(self, filename):
         try:
@@ -28,7 +30,7 @@ class Runner:
 
             print(f"[{idx}/{len(self.accounts)}] Запуск профиля {profile}...")
 
-            manager = ManagerBrowserContext()
+            manager = ManagerBrowserContext(self.human)
             started = await manager.start(profile)
 
             if not started:
@@ -39,6 +41,8 @@ class Runner:
             await asyncio.sleep(1)
 
             await manager.goto("https://rewards.testnet.app.canopynetwork.org/")
+
+            await manager.authorization("button.bg-green-600", "0x", page=manager.page)
 
             """ НАЧАЛО РАБОТЫ ПРОЕКТА В БРАУЗЕРЕ"""
 

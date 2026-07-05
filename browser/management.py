@@ -1,5 +1,3 @@
-import random
-
 from playwright.async_api import async_playwright
 
 from browser.adspawer_api_utils import start_browser, close_browser
@@ -8,12 +6,13 @@ from browser.adspawer_api_utils import start_browser, close_browser
 class ManagerBrowserContext:
     UNLOCK_TIMEOUT = 10000
 
-    def __init__(self):
+    def __init__(self, human):
         self.profile_number = None
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
+        self.human = human
 
     async def start(self, profile_number) -> bool:
         """
@@ -30,10 +29,7 @@ class ManagerBrowserContext:
 
             self.playwright = await async_playwright().start()
 
-            self.browser = await self.playwright.chromium.connect_over_cdp(
-                puppeteer_ws,
-                slow_mo=random.randint(2000, 3000),
-            )
+            self.browser = await self.playwright.chromium.connect_over_cdp(puppeteer_ws)
 
             self.context = (
                 self.browser.contexts[0]
@@ -143,3 +139,23 @@ class ManagerBrowserContext:
             await self.playwright.stop()
         if self.profile_number is not None:
             close_browser(self.profile_number)
+
+    async def isvisible_txt_button(self, button, txt):
+        try:
+            await button.wait_for(state="visible", timeout=5000)
+            button_text = await button.inner_text()
+            return txt in button_text  # вернёт True/False
+        except Exception as e:
+            print(f"[authorization] кнопка не появилась за 5с: {e}")
+            return False
+
+    async def authorization(self, selector, txt, page):
+        button = page.locator(selector).first
+        is_visible = await self.isvisible_txt_button(button, txt)
+        if is_visible:
+            # Кнопка видна и содержит нужный текст – ничего не делаем
+            return
+        else:
+            # Иначе кликаем
+            await self.human.click_on_selector(page=page, selector=selector)
+
