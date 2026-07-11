@@ -133,7 +133,7 @@ class Network:
             session.get(BASE_URL, timeout=5)
         except Exception as e:
             print("MODEM OPEN ERROR:", e)
-            return None
+            return None, None
 
         # логин
         try:
@@ -146,7 +146,7 @@ class Network:
             })
         except Exception as e:
             print("LOGIN ERROR:", e)
-            return None
+            return None, None
 
         history = load_history()
 
@@ -175,12 +175,12 @@ class Network:
 
             if same_ip_count >= MAX_SAME_IP:
                 print("❌ SAME IP LIMIT → STOP")
-                return None
+                return None, None
 
             if is_ip_valid(ip, history):
                 print("✅ IP OK")
                 history[ip] = time.time()
                 save_history(history)
-                return ip
+                return "SUCCESS", ip
             else:
                 print("IP USED RECENTLY → ROTATE AGAIN")

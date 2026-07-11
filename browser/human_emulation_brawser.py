@@ -32,6 +32,85 @@ class HumanMouse:
             return (w // 2, h // 2)
         return (self._last_x, self._last_y)
 
+    async def scroll_to_selector(self, page: Page, selector: str, timeout: int = 5000) -> bool:
+        """
+        Плавно докручує сторінку до елемента колесом миші невеликими кроками,
+        замість миттєвого scroll_into_view_if_needed (він телепортує без анімації).
+        Викликається окремо, до hover_on_selector/click_on_selector.
+        Повертає True, якщо елемент опинився у видимій області.
+        """
+        element = page.locator(selector).first
+        try:
+            await element.wait_for(state="visible", timeout=timeout)
+        except Exception:
+            print(f"[HumanMouse] scroll_to_selector: '{selector}' не появился за {timeout / 1000:.0f}с")
+            return False
+
+        # Мышь должна быть над контентом, иначе wheel может уйти не туда
+        w, h = await self._get_viewport_size(page)
+        await page.mouse.move(w // 2, h // 2)
+
+        for _ in range(20):
+            box = await element.bounding_box()
+            if not box:
+                return False
+
+            if 0 <= box["y"] and box["y"] + box["height"] <= h:
+                return True  # вже у видимій області
+
+            # скільки реально треба доскролити, щоб елемент влаштувався у в'юпорт —
+            # обмежуємо крок цією відстанню, інакше випадковий крок 150-350px
+            # може проскочити кнопку наскрізь
+            if box["y"] < 0:
+                direction = -1
+                distance = -box["y"]
+            else:
+                direction = 1
+                distance = (box["y"] + box["height"]) - h
+
+            step = min(random.randint(150, 350), max(int(distance), 30))
+            await page.mouse.wheel(0, direction * step)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+
+        print(f"[HumanMouse] scroll_to_selector: не удалось докрутить до '{selector}'")
+        return False
+
+    async def scroll_down_blind(self, page: Page, steps: int = 20) -> None:
+        """
+        Прокручує сторінку вниз наосліп, без орієнтира на елемент — для
+        лениво відрендерюваних блоків, яких ще немає в DOM, поки до них
+        не доскролити (на відміну від scroll_to_selector, який вимагає,
+        щоб елемент вже існував).
+        """
+        w, h = await self._get_viewport_size(page)
+        await page.mouse.move(w // 2, h // 2)
+        for _ in range(steps):
+            await page.mouse.wheel(0, random.randint(200, 400))
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+
+    async def scroll_to_top(self, page: Page, max_steps: int = 30) -> None:
+        """
+        Прокручує сторінку колесом миші вгору, поки скрол не стане 0
+        (або поки не вичерпаються спроби) — людиноподібна альтернатива
+        миттєвому scrollTo(0, 0). Деякі сторінки (наприклад лончпад)
+        скролляться не через window, а через внутрішній контейнер
+        #launchpad-content — перевіряємо його, якщо є, інакше window.scrollY.
+        """
+        w, h = await self._get_viewport_size(page)
+        await page.mouse.move(w // 2, h // 2)
+        get_scroll_top_js = """
+            () => {
+                const el = document.querySelector('#launchpad-content');
+                return el ? el.scrollTop : window.scrollY;
+            }
+        """
+        for _ in range(max_steps):
+            scroll_top = await page.evaluate(get_scroll_top_js)
+            if scroll_top <= 0:
+                return
+            await page.mouse.wheel(0, -random.randint(200, 400))
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+
     def _ease_in_out(self, t: float) -> float:
         """Плавна крива прискорення/гальмування (синусоїдальна)."""
         return (1 - math.cos(math.pi * t)) / 2
@@ -263,21 +342,23 @@ class HumanMouse:
         selector: str,
         duration: Optional[float] = None,
         urgent: bool = False,
+        timeout: int = 5000,
     ):
         """
         Клік на селекторі з людською поведінкою.
         Якщо urgent=True - летимо швидко і без промахів.
+        Повертає True, якщо клік реально відбувся, інакше False.
         """
         try:
             element = page.locator(selector).first
             try:
-                await element.wait_for(state="visible", timeout=5000)
+                await element.wait_for(state="visible", timeout=timeout)
             except Exception:
-                print(f"[HumanMouse] '{selector}' не появился за 5с")
-                return
+                print(f"[HumanMouse] '{selector}' не появился за {timeout / 1000:.0f}с")
+                return False
             box = await element.bounding_box()
             if not box:
-                return
+                return False
 
             # ---- КРОК 1: Клікаємо не ідеально в центр, а з випадковим зсувом ----
             # Діапазон -0.1 .. 1.1 дозволяє клікнути трохи за межі кнопки
@@ -320,8 +401,79 @@ class HumanMouse:
             await page.mouse.up()
 
             # ---- КРОК 6: Пауза після кліку ----
-            await asyncio.sleep(random.uniform(0.1, 0.35))
+            await asyncio.sleep(random.uniform(0.1, 0.35)) #0.1 - 0.35
 
+            return True
         except Exception as e:
             print(f"[HumanMouse] click_on_selector error '{selector}': {e}")
+            return False
+
+    async def type_text_selector(
+        self,
+        page: Page,
+        selector: str,
+        text: str,
+        mistake_prob: float = 0.04,
+        focus_first: bool = True,
+    ):
+        """
+        Людський ввід тексту: клік у поле (якщо focus_first=True), потім
+        посимвольний ввід з випадковими затримками, паузами "на подумати"
+        і рідкісними опечатками з виправленням через Backspace.
+
+        focus_first=False пропускає клік — для полів, які вже у фокусі
+        (курсор вже блимає всередині), де повторний клік може збити стан
+        сторінки (наприклад, викликати небажаний ре-рендер/перезавантаження).
+        """
+        try:
+            if focus_first:
+                clicked = await self.click_on_selector(page=page, selector=selector, urgent=True)
+                if not clicked:
+                    raise RuntimeError(f"клік по '{selector}' не удался, ввод текста пропущен")
+            else:
+                # Навіть якщо клік пропускаємо (припускаємо, що поле вже у фокусі),
+                # переконуємось, що елемент реально існує — інакше Ctrl+A вдарить
+                # по всій сторінці замість поля.
+                try:
+                    await page.locator(selector).first.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    raise RuntimeError(f"'{selector}' не появился за 5с (focus_first=False)")
+
+            # Очищаємо попередній вміст поля перед вводом нового тексту.
+            # Ctrl+A/Backspace інколи не спрацьовує (втрата фокуса, react-стейт
+            # переписує значення асинхронно), тому перевіряємо результат і,
+            # якщо поле все ще не пусте, чистимо примусово через .fill("").
+            locator = page.locator(selector).first
+            for _ in range(3):
+                await page.keyboard.press("Control+A")
+                await asyncio.sleep(random.uniform(0.05, 0.1))
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+
+                current_value = await locator.input_value()
+                if not current_value:
+                    break
+            else:
+                await locator.fill("")
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+
+            for char in text:
+                if random.random() < mistake_prob:
+                    wrong_char = random.choice("asdfghjklqwertyuiopzxcvbnm")
+                    await page.keyboard.type(wrong_char)
+                    await asyncio.sleep(random.uniform(0.08, 0.2))
+                    await page.keyboard.press("Backspace")
+                    await asyncio.sleep(random.uniform(0.05, 0.15))
+
+                await page.keyboard.type(char)
+                await asyncio.sleep(random.uniform(0.04, 0.18))
+
+                # Пауза "на подумати" між словами/символами
+                if random.random() < 0.05:
+                    await asyncio.sleep(random.uniform(0.2, 0.6))
+
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+        except Exception as e:
+            print(f"[HumanMouse] type_text_selector error '{selector}': {e}")
+            raise
 
