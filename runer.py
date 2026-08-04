@@ -2,11 +2,11 @@ import asyncio
 import csv
 import random
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 
 from browser.management import ManagerBrowserContext
-from config import WALLET_PASSWORD
+from config import WAIT_FOR_UTC_MIDNIGHT, WALLET_PASSWORD
 from network.network import Network
 from browser.human_emulation_brawser import HumanMouse
 from tasks.canopy_tasks import QuestsCanopy
@@ -22,6 +22,19 @@ def _format_duration(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+async def _wait_for_utc_midnight():
+    """Ждёт до ближайших 00:00 UTC (ежедневный сброс квестов/faucet)."""
+    now = datetime.now(timezone.utc)
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    wait_seconds = (next_midnight - now).total_seconds()
+    print(
+        f"Ожидаем 00:00 UTC ({next_midnight.strftime('%Y-%m-%d %H:%M:%S')} UTC), "
+        f"осталось {_format_duration(wait_seconds)}..."
+    )
+    await asyncio.sleep(wait_seconds)
+    print("00:00 UTC наступило, начинаем работу с профилями.")
 
 
 def _index_sort_key(index_str: str):
@@ -99,6 +112,9 @@ class Runner:
             self.accounts = []
 
     async def main(self):
+        if WAIT_FOR_UTC_MIDNIGHT:
+            await _wait_for_utc_midnight()
+
         start_time = time.monotonic()
         reset_points_report(self.accounts)
         for idx, (own_index, profile, twitter) in enumerate(self.accounts, 1):

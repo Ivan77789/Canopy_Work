@@ -7,6 +7,10 @@ from playwright.async_api import async_playwright
 from browser.adspawer_api_utils import start_browser, close_browser
 
 
+class CloudflareTimeoutError(Exception):
+    """Проверка безопасности Cloudflare не исчезла за отведённое время."""
+
+
 class ManagerBrowserContext:
     UNLOCK_TIMEOUT = 10000
 
@@ -138,36 +142,69 @@ class ManagerBrowserContext:
             await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         await self.wait_for_cloudflare(self.page)
 
-    @staticmethod
-    async def wait_for_cloudflare(page, max_wait: int = 30) -> bool:
+    async def wait_for_cloudflare(self, page, max_wait: int = 30, attempts: int = 2) -> bool:
         """
         Ждёт, пока исчезнет промежуточная страница проверки Cloudflare
         ("Ray ID:" в футере — стабильный маркер вне зависимости от языка
         интерфейса). Обычно она резолвится сама за несколько секунд без
         участия пользователя, поэтому просто ждём с рандомной паузой.
-        Возвращает True, если капчи не было или она исчезла, False — если
-        провисела дольше max_wait секунд.
+        После паузы дополнительно проверяет баннер cookie-согласия
+        ("We value your privacy") — он рендерится один раз при загрузке
+        страницы, поэтому логично проверять его именно тут, а не на
+        каждом клике.
+        Даёт до `attempts` попыток по `max_wait` секунд каждая — единичное
+        превышение 30с не всегда означает, что капча зависла намертво,
+        иногда ей просто нужно чуть больше времени.
+        Возвращает True, если капчи не было или она исчезла. Если не исчезла
+        ни за одну из попыток — бросает CloudflareTimeoutError (продолжать
+        поиск селекторов на странице с капчей бессмысленно, вызывающий код
+        должен прервать задачу, а не проваливать все последующие шаги по очереди).
         """
-        elapsed = 0.0
-        while elapsed < max_wait:
-            try:
-                is_challenge = await page.locator("text=Ray ID:").count() > 0
-            except Exception:
-                is_challenge = False
+        for attempt in range(1, attempts + 1):
+            # даём странице пару секунд на рендер виджета Cloudflare (текст "Ray ID:"
+            # появляется не мгновенно после domcontentloaded) — иначе первая же
+            # проверка ниже может пройти "мимо" ещё не отрисовавшейся капчи
+            await asyncio.sleep(random.uniform(2, 4))
 
-            if not is_challenge:
-                # небольшая пауза после исчезновения заглушки — дать странице
-                # догрузить контент, прежде чем искать на ней элементы
-                await asyncio.sleep(random.uniform(2, 4))
-                return True
+            elapsed = 0.0
+            while elapsed < max_wait:
+                try:
+                    is_challenge = await page.locator("text=Ray ID:").count() > 0
+                except Exception:
+                    is_challenge = False
 
-            # print("[Cloudflare] Обнаружена проверка безопасности, ждём...")
-            pause = random.uniform(2, 4)
-            await asyncio.sleep(pause)
-            elapsed += pause
+                if not is_challenge:
+                    # небольшая пауза после исчезновения заглушки — дать странице
+                    # догрузить контент, прежде чем искать на ней элементы
+                    await asyncio.sleep(random.uniform(2, 4))
+                    await self._dismiss_privacy_consent(page)
+                    return True
 
-        print(f"[Cloudflare] Проверка безопасности не исчезла за {max_wait}с")
-        return False
+                print("[Cloudflare] Обнаружена проверка безопасности, ждём...")
+                pause = random.uniform(2, 4)
+                await asyncio.sleep(pause)
+                elapsed += pause
+
+            print(f"[Cloudflare] Попытка {attempt}/{attempts}: проверка безопасности не исчезла за {max_wait}с")
+
+            if attempt < attempts:
+                # перед следующей попыткой перезагружаем страницу — зависшая
+                # проверка сама по себе не сдвинется, нужен новый заход
+                try:
+                    await page.reload(wait_until="commit", timeout=10000)
+                except Exception as e:
+                    print(f"[Cloudflare] Не удалось перезагрузить страницу перед повторной попыткой: {e}")
+
+        raise CloudflareTimeoutError(f"Проверка безопасности не исчезла за {attempts} попытки по {max_wait}с")
+
+    async def _dismiss_privacy_consent(self, page) -> None:
+        """Закрывает баннер cookie-согласия кликом 'Decline', если он появился."""
+        try:
+            decline_button = page.locator('button:has-text("Decline")')
+            if await decline_button.count() > 0:
+                await self.human.click_on_selector(page=page, selector='button:has-text("Decline")')
+        except Exception as e:
+            print(f"[Privacy] Не удалось закрыть баннер согласия: {e}")
 
     async def close(self):
         """Корректно закрывает страницу/контекст/браузер/playwright и профиль в AdsPower."""

@@ -6,38 +6,77 @@ import tempfile
 import requests
 from PIL import Image
 
+from browser.management import CloudflareTimeoutError
 from config import OPENAI_API_KEY
 from name_chaine import NAME_SHAIN
 
 
 class QuestsCanopy:
+    _GREEN = "\033[92m"
+    _RED = "\033[91m"
+    _RESET = "\033[0m"
+
     def __init__(self, human, manager):
         self.human = human
         self.manager = manager
+
+    @classmethod
+    def _log_result(cls, message: str, success: bool) -> None:
+        color = cls._GREEN if success else cls._RED
+        print(f"{color}{message}{cls._RESET}")
+
+    async def _click_or_fail(self, page, selector: str, label: str | None = None, timeout: int = 5000) -> None:
+        """
+        Скроллит к селектору и кликает по нему; если элемент не появился/клик
+        не удался — бросает исключение вместо того, чтобы молча идти дальше
+        с шагом, который на самом деле не выполнился (иначе визард считает
+        шаг пройденным, хотя данные не сохранились, и ошибка всплывает
+        только на одном из последующих шагов).
+        """
+        await self.human.scroll_to_selector(page=page, selector=selector, timeout=timeout)
+        clicked = await self.human.click_on_selector(page=page, selector=selector, timeout=timeout)
+        if not clicked:
+            raise RuntimeError(f"кнопка '{label or selector}' не найдена")
 
     # ==================================================================
     # Публичные задачи (вызываются из runer.py)
     # ==================================================================
 
-    # launch_virtual_hain() — задача "запустить новый чейн": открывает свою
-    # вкладку и гарантированно закрывает её в finally, что бы ни случилось внутри
-    async def launch_virtual_hain(self, twitter_handle: str = ""):
-        page = await self.manager.context.new_page()
+    # launch_virtual_hain() — задача "запустить новый чейн": владение вкладкой
+    # полностью внутри _body (там же и retry-логика, которая её пересоздаёт)
+    async def launch_virtual_hain(self, twitter_handle: str = "") -> bool:
+        success = False
         try:
-            await self._launch_virtual_hain_body(page, twitter_handle)
+            success = await self._launch_virtual_hain_body(twitter_handle)
+        except Exception:
+            success = False
         finally:
-            await page.close()
+            if success:
+                self._log_result("[Launch Chain] Чейн запущен", True)
+            else:
+                self._log_result("[Launch Chain] Не удалось запустить чейн", False)
+        return success
 
-    async def _launch_virtual_hain_body(self, page, twitter_handle: str = ""):
-        # открываем визард запуска чейна
-        await page.goto(
-            "https://testnet.app.canopynetwork.org/launchpad/",
-            wait_until="domcontentloaded",
-            timeout=15000,
-        )
-        # ждём, пока пройдёт проверка Cloudflare, прежде чем искать элементы на странице
-        await self.manager.wait_for_cloudflare(page)
-        await asyncio.sleep(random.uniform(3, 6))
+    async def _launch_virtual_hain_body(self, twitter_handle: str = "") -> bool:
+        launchpad_url = "https://testnet.app.canopynetwork.org/launchpad/"
+        page = None
+
+        # при любой ошибке (селектор не найден и т.п.) закрываем текущую вкладку
+        # и открываем новую с нуля — заново проходя проверку Cloudflare
+        async def open_fresh_page():
+            nonlocal page
+            if page is not None and not page.is_closed():
+                await page.close()
+            page = await self.manager.context.new_page()
+            await page.goto(launchpad_url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await self.manager.wait_for_cloudflare(page)
+            except CloudflareTimeoutError:
+                await page.close()
+                raise
+            await asyncio.sleep(random.uniform(3, 6))
+
+        await open_fresh_page()
 
         # Случайные значения по умолчанию — на случай, если шаг "Main Info" уже
         # пройден и пропущен (тогда fill_main_info не выполнится и не переприсвоит их),
@@ -49,10 +88,9 @@ class QuestsCanopy:
 
         # Шаг 1 "Language": выбираем язык проекта (Python) и жмём Continue
         async def fill_language():
-            await self.human.scroll_to_selector(page=page, selector='img[alt="python logo"]')
-            await self.human.click_on_selector(page=page, selector='img[alt="python logo"]')
-            await self.human.scroll_to_selector(page=page, selector='button:has-text("Continue")')
-            await self.human.click_on_selector(page=page, selector='button:has-text("Continue")')
+            await self._click_or_fail(page, 'img[alt="python logo"]', "python logo")
+            await asyncio.sleep(random.uniform(2, 3))
+            await self._click_or_fail(page, 'button:has-text("Continue")', "Continue")
 
         # Шаг 2 "Connect Repo": авторизуем GitHub (если ещё не авторизован),
         # ищем и подключаем репозиторий "canopy"
@@ -63,17 +101,14 @@ class QuestsCanopy:
             # else:
             #     print("[QuestsCanopy] Кнопка 'Authorize GitHub' не найдена — GitHub уже авторизован, пропускаем.")
 
-            await self.human.scroll_to_selector(page=page, selector='button:has-text("Select Repository")')
-            await self.human.click_on_selector(page=page, selector='button:has-text("Select Repository")')
+            await self._click_or_fail(page, 'button:has-text("Select Repository")', "Select Repository")
             await self.human.type_text_selector(
                 page=page, selector='input[placeholder="Search repositories..."]', text="canopy"
             )
-            await self.human.scroll_to_selector(page=page, selector='div.border-2.cursor-pointer')
-            await self.human.click_on_selector(page=page, selector='div.border-2.cursor-pointer')
-            await self.human.scroll_to_selector(page=page, selector='text=Connect Repository')
-            await self.human.click_on_selector(page=page, selector='text=Connect Repository')
-            await self.human.scroll_to_selector(page=page, selector='text=Continue')
-            await self.human.click_on_selector(page=page, selector='text=Continue')
+            await self._click_or_fail(page, 'div.border-2.cursor-pointer', "выбор репозитория")
+            await self._click_or_fail(page, 'text=Connect Repository', "Connect Repository")
+            await asyncio.sleep(random.uniform(2, 3))
+            await self._click_or_fail(page, 'text=Continue', "Continue")
 
         # Шаг 3 "Main Info": подбираем свободные имя чейна и тикер
         # (resolve_available_value сам перебирает варианты, пока сайт не подтвердит доступность)
@@ -88,8 +123,8 @@ class QuestsCanopy:
             ticker = await self._resolve_available_value(
                 page, '[placeholder="Enter your ticker"]', "Ticker is available!", self._get_random_ticker
             )
-            await self.human.scroll_to_selector(page=page, selector='text=Continue')
-            await self.human.click_on_selector(page=page, selector='text=Continue')
+            await asyncio.sleep(random.uniform(2, 3))
+            await self._click_or_fail(page, 'text=Continue', "Continue")
 
 
         # Шаг 4 "Branding & Media": загружаем сгенерированное лого и описание (через GPT)
@@ -103,31 +138,68 @@ class QuestsCanopy:
             # Даём странице отрисовать превью лого и блок "Brand Color" —
             # иначе вёрстка съезжает, пока курсор летит к textarea, и клик мажет мимо поля.
             await asyncio.sleep(random.uniform(1, 2))
+            await self.human.scroll_up_blind(page, steps=random.randint(3, 5))
 
-            description = self._generate_description_via_gpt(chain_name)
-            await self.human.scroll_to_selector(page=page, selector="textarea#chainDescription")
-            await self.human.type_text_selector(
-                page=page, selector="textarea#chainDescription", text=description
-            )
-            await self.human.scroll_to_selector(page=page, selector='text=Continue')
-            await self.human.click_on_selector(page=page, selector='text=Continue')
+            # GPT иногда генерирует текст, который модерация сайта считает неприемлемым —
+            # после ввода ждём и проверяем сообщение об ошибке под полем; если оно есть,
+            # генерируем новое описание и вводим заново, максимум 3 раза.
+            max_description_retries = 3
+            for attempt in range(1, max_description_retries + 1):
+                description = self._generate_description_via_gpt(chain_name)
+                await self.human.scroll_to_selector(page=page, selector="textarea#chainDescription")
+                await self.human.type_text_selector(
+                    page=page, selector="textarea#chainDescription", text=description
+                )
+                await asyncio.sleep(random.uniform(2, 3))
+                if await page.locator('text=/inappropriate language/i').count() == 0:
+                    break
+                print(
+                    f"[QuestsCanopy] Попытка {attempt}/{max_description_retries}: "
+                    "описание отклонено модерацией ('inappropriate language'), генерируем новое"
+                )
+            else:
+                raise RuntimeError("DESCRIPTION_INAPPROPRIATE_LANGUAGE: описание отклонено модерацией")
+
+            await self._click_or_fail(page, 'text=Continue', "Continue")
 
         # Шаг 5 "Links & Documentation": вводим Twitter/X (если задан для профиля)
         # и прикладываем сгенерированный PDF с документацией
         async def fill_links_and_documentation():
+
             if twitter_handle:
-                await self.human.scroll_to_selector(page=page, selector='button:has-text("Twitter/X")')
-                await self.human.click_on_selector(page=page, selector='button:has-text("Twitter/X")')
-                try:
-                    await self.human.type_text_selector(
-                        page=page,
-                        selector="input[placeholder*='@yourchainhandle']",
-                        text=twitter_handle,
-                    )
-                except Exception as e:
-                    print(f"[QuestsCanopy] Не удалось найти поле ввода Twitter/X: {e}")
-            else:
-                print("[QuestsCanopy] Twitter handle не задан для этого профиля, пропускаем.")
+                max_retries = 5
+                for attempt in range(1, max_retries + 1):
+                    # если с прошлой попытки остался незаполненный/битый пункт соцсети
+                    # (иконка корзины рядом с полем) — закрываем его, иначе идём дальше как есть
+                    await asyncio.sleep(random.uniform(2, 3))
+                    trash_button = page.locator("button:has(svg.lucide-trash2)")
+                    if await trash_button.count() > 0:
+                        await self.human.click_on_selector(page=page, selector="button:has(svg.lucide-trash2)")
+
+                    await self.human.scroll_to_selector(page=page, selector='button:has-text("Twitter/X")')
+                    clicked_twitter = await self.human.click_on_selector(page=page, selector='button:has-text("Twitter/X")')
+
+                    if not clicked_twitter:
+                        print(f"[QuestsCanopy] Попытка {attempt}/{max_retries}: кнопка 'Twitter/X' не появилась, перезагружаем страницу")
+                        await page.reload(wait_until="domcontentloaded", timeout=15000)
+                        await self.manager.wait_for_cloudflare(page)
+                        await asyncio.sleep(random.uniform(2, 3))
+                        continue
+
+                    try:
+                        await self.human.type_text_selector(
+                            page=page,
+                            selector="input[placeholder*='@yourchainhandle']",
+                            text=twitter_handle,
+                        )
+                        break
+                    except Exception as e:
+                        print(f"[QuestsCanopy] Попытка {attempt}/{max_retries}: не удалось ввести Twitter/X handle: {e}")
+                else:
+                    # не молчим и не идём дальше с несохранённым шагом — раз кнопка
+                    # так и не появилась за все попытки, это уже не «пропускаем»,
+                    # а повод перезайти на страницу целиком
+                    raise RuntimeError(f"кнопка 'Twitter/X' не найдена за {max_retries} попыток")
 
             pdf_path = self._generate_random_pdf()
             try:
@@ -135,19 +207,20 @@ class QuestsCanopy:
             finally:
                 os.remove(pdf_path)
 
-            await self.human.scroll_to_selector(page=page, selector='text=Continue')
-            await self.human.click_on_selector(page=page, selector='text=Continue')
+            await asyncio.sleep(random.uniform(2, 3))
+            await self._click_or_fail(page, 'text=Continue', "Continue")
 
         # Шаг 6 "Launch Settings": указываем сумму первоначальной покупки токена
         async def fill_launch_settings():
             await self.human.type_text_selector(page=page, selector="input#initialPurchaseAmount", text="1")
-            await self.human.scroll_to_selector(page=page, selector='text=Continue')
-            await self.human.click_on_selector(page=page, selector='text=Continue')
+            await asyncio.sleep(random.uniform(2, 3))
+            await self._click_or_fail(page, 'text=Continue', "Continue")
 
         # Шаг 7 "Review & Payment": последний шаг — разблокируем кошелёк (если просят),
         # жмём "Pay & Launch Chain" и ждём редиректа на страницу запущенного чейна
         async def fill_review_and_payment():
             await asyncio.sleep(2)
+
             # докручиваем внутренний скролл-контейнер до конца, чтобы кнопка оплаты стала видна
             await page.evaluate("""
                 () => {
@@ -161,20 +234,52 @@ class QuestsCanopy:
             """)
 
             if await page.locator('button:has-text("Unlock wallet to pay")').count() > 0:
-                await self.human.scroll_to_selector(page=page, selector='button:has-text("Unlock wallet to pay")')
-                await self.human.click_on_selector(page=page, selector='button:has-text("Unlock wallet to pay")')
-                await self.human.scroll_to_selector(page=page, selector='[data-testid="wallet-unlock-submit-button"]')
-                await self.human.click_on_selector(page=page, selector='[data-testid="wallet-unlock-submit-button"]')
+                await self._click_or_fail(page, 'button:has-text("Unlock wallet to pay")', "Unlock wallet to pay")
+                await self._click_or_fail(
+                    page, '[data-testid="wallet-unlock-submit-button"]', "wallet-unlock-submit-button"
+                )
                 await asyncio.sleep(2)
 
-            await self.human.scroll_to_selector(page=page, selector='button:has-text("Pay & Launch Chain")')
-            await self.human.click_on_selector(page=page, selector='button:has-text("Pay & Launch Chain")')
+            await self._click_or_fail(
+                page, 'button:has-text("Pay & Launch Chain")', "Pay & Launch Chain", timeout=15000
+            )
+
+            # обе ошибки показываются только ПОСЛЕ клика — даём странице время на реакцию
+            await asyncio.sleep(random.uniform(2, 3))
+
+            # Rate limit — ждать не будем, просто логируем и завершаем задачу как есть
+            rate_limit = page.locator('text=/Chain creation rate limit exceeded/i')
+            if await rate_limit.count() > 0:
+                message = await rate_limit.text_content()
+                # print(f"[QuestsCanopy] {message} — не ждём, завершаем.")
+                return False
+
+            # Название/тикер могли перехватить, пока мы заполняли остальные шаги —
+            # раз последняя галочка тут — не "Main Info", обычный ретрай её не перезайдёт,
+            # поэтому кидаем маркер-ошибку, которую внешний цикл распознаёт и вернётся в Main Info.
+            if await page.locator('text=Token symbol already exists').count() > 0:
+                raise RuntimeError("TICKER_COLLISION: Token symbol already exists")
+
+            # Описание от GPT могло случайно совпасть с чьим-то ещё — аналогично,
+            # маркер-ошибка, которую внешний цикл распознаёт и вернётся в "Branding & Media"
+            # (там же генерируется description), чтобы получить новый текст.
+            if await page.locator('text=Chain description already exists').count() > 0:
+                raise RuntimeError("DESCRIPTION_COLLISION: Chain description already exists")
+
+            # Модерация могла посчитать имя/тикер/описание неприемлемыми (chain_name,
+            # token_name, chain_description бьются одной ошибкой, т.к. описание
+            # генерируется из chain_name) — возвращаемся в "Main Info" за новым именем,
+            # оттуда цепочка шагов сама перегенерирует и описание в "Branding & Media".
+            if await page.locator('text=/inappropriate language/i').count() > 0:
+                raise RuntimeError("INAPPROPRIATE_LANGUAGE: field contains inappropriate language")
 
             try:
                 await page.wait_for_url("**/chains/**", timeout=120000)
-                print(f"[QuestsCanopy] Чейн успешно запущен: {page.url}")
+                # print(f"[QuestsCanopy] Чейн успешно запущен: {page.url}")
+                return True
             except Exception as e:
-                print(f"[QuestsCanopy] Не дождались подтверждения запуска чейна: {e}")
+                # print(f"[QuestsCanopy] Не дождались подтверждения запуска чейна: {e}")
+                return False
 
         # порядок шагов визарда — должен совпадать с порядком в сайдбаре "Launch Steps"
         steps = [
@@ -190,21 +295,36 @@ class QuestsCanopy:
         # проходим шаги визарда с повторами: если что-то упадёт по пути —
         # перезагружаем страницу и продолжаем с того места, где остановились
         max_retries = 5
+        force_restart_step = None  # если задан — принудительно перезаходим именно сюда (игнорируя галочку)
+        last_result = False  # результат последнего выполненного шага (важен только для Review & Payment)
         for attempt in range(1, max_retries + 1):
             try:
-                # Галочка в сайдбаре не гарантирует, что шаг реально до конца сохранён
-                # (кнопка Continue может быть неактивна) — поэтому последний "зелёный"
-                # шаг не пропускаем, а принудительно перезаходим и заполняем заново.
-                last_done_index = await self._get_last_done_index(page, steps)
-                start_index = max(last_done_index, 0)
+                if force_restart_step is not None:
+                    start_index = next(i for i, (name, _) in enumerate(steps) if name == force_restart_step)
+                    force_reenter_indices = {start_index}
+                    if force_restart_step == "Main Info":
+                        # chain_name перегенерируется в Main Info, а описание в Branding & Media
+                        # сгенерировано из старого chain_name — галочка там уже стоит, но
+                        # содержимое устарело, поэтому шаг тоже нужно перезайти и перезаполнить,
+                        # а не пропускать по старой отметке "пройдено".
+                        branding_index = next(i for i, (name, _) in enumerate(steps) if name == "Branding & Media")
+                        force_reenter_indices.add(branding_index)
+                    force_restart_step = None
+                else:
+                    # Галочка в сайдбаре не гарантирует, что шаг реально до конца сохранён
+                    # (кнопка Continue может быть неактивна) — поэтому последний "зелёный"
+                    # шаг не пропускаем, а принудительно перезаходим и заполняем заново.
+                    last_done_index = await self._get_last_done_index(page, steps)
+                    start_index = max(last_done_index, 0)
+                    force_reenter_indices = {start_index} if last_done_index >= 0 else set()
 
                 for index, (step_name, fill_action) in enumerate(steps):
                     if index < start_index:
-                        print(f"[QuestsCanopy] Шаг '{step_name}' уже пройден, пропускаем.")
+                        # print(f"[QuestsCanopy] Шаг '{step_name}' уже пройден, пропускаем.")
                         continue
 
-                    if index == start_index and last_done_index >= 0:
-                        print(f"[QuestsCanopy] Перезаходим на последний пройденный шаг '{step_name}' и заполняем заново.")
+                    if index in force_reenter_indices:
+                        # print(f"[QuestsCanopy] Перезаходим на шаг '{step_name}' и заполняем заново.")
                         await self.human.scroll_to_selector(page=page, selector=f'button:has-text("{step_name}")')
                         await self.human.click_on_selector(page=page, selector=f'button:has-text("{step_name}")')
                     else:
@@ -213,74 +333,148 @@ class QuestsCanopy:
                             continue
 
                     await asyncio.sleep(1)
-                    await fill_action()
+                    last_result = await fill_action()
                 break  # все шаги прошли успешно
+            except CloudflareTimeoutError:
+                # капча не исчезла — дальнейшие попытки на этой же странице бессмысленны
+                # (все последующие селекторы просто не найдутся один за другим),
+                # поэтому не ретраим через open_fresh_page, а сразу прерываем задачу
+                if page is not None and not page.is_closed():
+                    await page.close()
+                raise
             except Exception as e:
-                print(
-                    f"[QuestsCanopy] Ошибка на попытке {attempt}/{max_retries}: {e}. "
-                    "Перезагружаем страницу и продолжаем с последнего пройденного шага."
-                )
-                await page.reload(wait_until="domcontentloaded", timeout=15000)
-                await self.manager.wait_for_cloudflare(page)
+                if "TICKER_COLLISION" in str(e):
+                    # print(
+                    #     f"[QuestsCanopy] Название/тикер заняты (попытка {attempt}/{max_retries}) — "
+                    #     "возвращаемся в 'Main Info' и подбираем заново."
+                    # )
+                    force_restart_step = "Main Info"
+                elif "DESCRIPTION_COLLISION" in str(e):
+                    # print(
+                    #     f"[QuestsCanopy] Описание чейна занято (попытка {attempt}/{max_retries}) — "
+                    #     "возвращаемся в 'Branding & Media' и генерируем заново."
+                    # )
+                    force_restart_step = "Branding & Media"
+                elif "DESCRIPTION_INAPPROPRIATE_LANGUAGE" in str(e):
+                    # print(
+                    #     f"[QuestsCanopy] Описание не прошло модерацию за все попытки regen (попытка {attempt}/{max_retries}) — "
+                    #     "возвращаемся в 'Branding & Media' и пробуем ещё раз."
+                    # )
+                    force_restart_step = "Branding & Media"
+                elif "INAPPROPRIATE_LANGUAGE" in str(e):
+                    # print(
+                    #     f"[QuestsCanopy] Имя/тикер/описание отклонены модерацией (попытка {attempt}/{max_retries}) — "
+                    #     "возвращаемся в 'Main Info' и подбираем новое имя (описание перегенерируется само)."
+                    # )
+                    force_restart_step = "Main Info"
+                else:
+                    pass
+                    # print(
+                    #     f"[QuestsCanopy] Ошибка на попытке {attempt}/{max_retries}: {e}. "
+                    #     "Закрываем вкладку, открываем новую и заново проходим проверку Cloudflare."
+                    # )
+                await open_fresh_page()
                 await asyncio.sleep(2)
         else:
-            print(f"[QuestsCanopy] Не удалось пройти все шаги визарда за {max_retries} попыток.")
+            # print(f"[QuestsCanopy] Не удалось пройти все шаги визарда за {max_retries} попыток.")
+            await page.close()
+            return False
+
+        await page.close()
+        return bool(last_result)
 
     # faucet() — задача "получить тестовые токены": тоже своя вкладка, закрывается в finally
-    async def faucet(self):
+    async def faucet(self) -> bool:
         page_faucet = await self.manager.context.new_page()
+        status = "failed"
         try:
-            await self._faucet_body(page_faucet)
+            status = await self._faucet_body(page_faucet)
+        except Exception:
+            status = "failed"
         finally:
             await page_faucet.close()
+            if status == "claimed":
+                self._log_result("[Faucet] Токены получены", True)
+            elif status == "already_claimed":
+                self._log_result("[Faucet] Токены получены ранее", True)
+            else:
+                self._log_result("[Faucet] Не удалось получить токены", False)
+        return status in ("claimed", "already_claimed")
 
-    async def _faucet_body(self, page_faucet):
-        await page_faucet.goto(
-            "https://testnet.app.canopynetwork.org/faucet/",
-            wait_until="domcontentloaded",
-            timeout=15000,
-        )
-        await self.manager.wait_for_cloudflare(page_faucet)
+    async def _faucet_body(self, page_faucet) -> str:
+        # если клейм не подтвердился — перезагружаем страницу и пробуем заново
+        # с самого начала (включая ожидание Cloudflare), максимум 3 раза
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            await page_faucet.goto(
+                "https://testnet.app.canopynetwork.org/faucet/",
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            await self.manager.wait_for_cloudflare(page_faucet)
 
-        # если кнопка уже показывает "Check Again" — значит токены сегодня уже получены,
-        # клик не нужен вообще
-        already_claimed = await page_faucet.locator('button:has-text("Check Again")').count() > 0
-        if already_claimed:
-            print("[Faucet] Кнопка 'Check Again' — токены уже получены сегодня, пропускаем клик")
+            # если кнопка уже показывает "Check Again" — значит токены сегодня уже получены,
+            # клик не нужен вообще
+            already_claimed = await page_faucet.locator('button:has-text("Check Again")').count() > 0
+            if already_claimed:
+                return "already_claimed"
 
-            return
+            # иначе проверяем, что кнопка реально доступна для клейма, и жмём её
+            button = page_faucet.locator('button:has-text("Claim Test Funds")').first
+            is_visible = await self.manager.isvisible_txt_button(button, "Claim Test Funds", timeout=10000)
+            if not is_visible:
+                # кнопка недоступна — вероятно, тоже уже получено сегодня
+                return "already_claimed"
 
-        # иначе проверяем, что кнопка реально доступна для клейма, и жмём её
-        button = page_faucet.locator('button:has-text("Claim Test Funds")').first
-        is_visible = await self.manager.isvisible_txt_button(button, "Claim Test Funds", timeout=10000)
-        if is_visible:
             await self.human.scroll_to_selector(page=page_faucet, selector='button:has-text("Claim Test Funds")')
             await self.human.click_on_selector(page=page_faucet, selector='button:has-text("Claim Test Funds")')
             # ждём подтверждение "Funds Claimed!" — без этого не знаем, прошёл клейм или нет
             try:
                 await page_faucet.locator('text=Funds Claimed!').wait_for(state="visible", timeout=20000)
-                print("[Faucet] Funds Claimed! тестовые токены получены")
+                return "claimed"
             except Exception:
-                print("[Faucet] Не дождались подтверждения 'Funds Claimed!' за 20с")
-        else:
-            print("[Faucet] Кнопка 'Claim Test Funds' недоступна (вероятно, уже получено сегодня)")
+                print(f"[Faucet] Попытка {attempt}/{max_retries}: подтверждение 'Funds Claimed!' не появилось, перезагружаем страницу")
 
-    # bay_token() — задача "купить токен своего чейна": своя вкладка, закрывается в finally
-    async def bay_token(self):
-        page_trade = await self.manager.context.new_page()
+        return "failed"
+
+    # bay_token() — задача "купить токен своего чейна": владение вкладкой
+    # полностью внутри _body (там же и retry-логика, которая её пересоздаёт)
+    async def bay_token(self) -> bool:
+        success = False
         try:
-            await self._bay_token_body(page_trade)
+            success = await self._bay_token_body()
+        except Exception:
+            success = False
         finally:
-            await page_trade.close()
+            if success:
+                self._log_result("[Buy Token] Токен куплен", True)
+            else:
+                self._log_result("[Buy Token] Не удалось купить токен", False)
+        return success
 
-    async def _bay_token_body(self, page_trade):
+    async def _bay_token_body(self) -> bool:
         # список всех проектов — стартовая точка, на неё же возвращаемся при повторных попытках
         projects_url = "https://testnet.app.canopynetwork.org/projects"
-        await page_trade.goto(projects_url, wait_until="domcontentloaded", timeout=15000)
-        await self.manager.wait_for_cloudflare(page_trade)
+        page_trade = None
+
+        # при любой ошибке закрываем текущую вкладку и открываем новую с нуля —
+        # заново проходя проверку Cloudflare
+        async def open_fresh_page():
+            nonlocal page_trade
+            if page_trade is not None and not page_trade.is_closed():
+                await page_trade.close()
+            page_trade = await self.manager.context.new_page()
+            await page_trade.goto(projects_url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await self.manager.wait_for_cloudflare(page_trade)
+            except CloudflareTimeoutError:
+                await page_trade.close()
+                raise
+
+        await open_fresh_page()
 
         # вся цепочка кликов (фильтр -> выбор чейна -> сумма -> Continue -> Confirm)
-        # обёрнута в retry: если любой шаг не удался — возвращаемся на /projects и пробуем заново
+        # обёрнута в retry: если любой шаг не удался — закрываем вкладку, открываем новую и пробуем заново
         max_retries = 5
         for attempt in range(1, max_retries + 1):
             try:
@@ -324,21 +518,23 @@ class QuestsCanopy:
 
                 break  # весь путь до "Confirm" пройден успешно
             except Exception as e:
-                # print(f"[Trade] Попытка {attempt}/{max_retries} не удалась ({e}), возвращаемся к списку проектов")
-                await page_trade.goto(projects_url, wait_until="domcontentloaded", timeout=15000)
-                await self.manager.wait_for_cloudflare(page_trade)
+                # print(f"[Trade] Попытка {attempt}/{max_retries} не удалась ({e}), закрываем вкладку и открываем новую")
+                await open_fresh_page()
                 await asyncio.sleep(random.uniform(2, 4))
         else:
-            print(f"[Trade] Не удалось выполнить своп за {max_retries} попыток.")
-            return
+            # print(f"[Trade] Не удалось выполнить своп за {max_retries} попыток.")
+            await page_trade.close()
+            return False
 
         # после "Confirm" ещё не значит, что транзакция подтвердилась в блокчейне —
         # ждём диалог успеха с кнопкой "Done"
         confirmed = await self._wait_for_tx_confirmed(page_trade, timeout=90)
-        if confirmed:
-            print("[Trade] Транзакция подтверждена (диалог 'Done')")
-        else:
-            print("[Trade] Не дождались подтверждения транзакции за 90с")
+        # if confirmed:
+        #     print("[Trade] Транзакция подтверждена (диалог 'Done')")
+        # else:
+        #     print("[Trade] Не дождались подтверждения транзакции за 90с")
+        await page_trade.close()
+        return confirmed
 
     # ==================================================================
     # Вспомогательные методы
@@ -426,7 +622,7 @@ class QuestsCanopy:
             text = response.json()["choices"][0]["message"]["content"].strip()
             return text or fallback
         except Exception as e:
-            print(f"[QuestsCanopy] Ошибка генерации описания через GPT: {e}")
+            # print(f"[QuestsCanopy] Ошибка генерации описания через GPT: {e}")
             return fallback
 
     async def _run_step_sequence(self, page, steps, max_iterations: int = 20):
@@ -451,15 +647,15 @@ class QuestsCanopy:
                     continue
 
             if current is None:
-                print("[QuestsCanopy] Ни один известный шаг не найден — завершено или незнакомый экран.")
+                # print("[QuestsCanopy] Ни один известный шаг не найден — завершено или незнакомый экран.")
                 return
 
             marker, action = current
-            print(f"[QuestsCanopy] Текущий шаг: {marker}")
+            # print(f"[QuestsCanopy] Текущий шаг: {marker}")
             await action()
             await asyncio.sleep(1.5)  # дать странице среагировать перед повторным сканом
 
-        print("[QuestsCanopy] Достигнут лимит итераций, шаги не завершились.")
+        # print("[QuestsCanopy] Достигнут лимит итераций, шаги не завершились.")
 
     async def _wait_for_tx_confirmed(self, page, timeout: int = 90) -> bool:
         """
@@ -489,7 +685,7 @@ class QuestsCanopy:
         Возвращает True, если перешли (и нужно заполнять поля), False — если шаг уже готов.
         """
         if await self._is_step_done(page, step_name):
-            print(f"[QuestsCanopy] Шаг '{step_name}' уже пройден, пропускаем.")
+            # print(f"[QuestsCanopy] Шаг '{step_name}' уже пройден, пропускаем.")
             return False
 
         await self.human.scroll_to_selector(page=page, selector=f'button:has-text("{step_name}")')
@@ -533,5 +729,5 @@ class QuestsCanopy:
             # print(f"[QuestsCanopy] '{value}' недоступно, пробуем новое.")
             value = get_new_value()
 
-        print(f"[QuestsCanopy] Не удалось подобрать свободное значение за 10 попыток ({selector}).")
+        # print(f"[QuestsCanopy] Не удалось подобрать свободное значение за 10 попыток ({selector}).")
         return value

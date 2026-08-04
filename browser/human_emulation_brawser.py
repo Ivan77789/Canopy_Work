@@ -88,6 +88,14 @@ class HumanMouse:
             await page.mouse.wheel(0, random.randint(200, 400))
             await asyncio.sleep(random.uniform(0.1, 0.25))
 
+    async def scroll_up_blind(self, page: Page, steps: int = 20) -> None:
+        """Те саме, що scroll_down_blind, але вгору."""
+        w, h = await self._get_viewport_size(page)
+        await page.mouse.move(w // 2, h // 2)
+        for _ in range(steps):
+            await page.mouse.wheel(0, -random.randint(200, 400))
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+
     async def scroll_to_top(self, page: Page, max_steps: int = 30) -> None:
         """
         Прокручує сторінку колесом миші вгору, поки скрол не стане 0
